@@ -6,10 +6,10 @@ import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Badge } from "@/components/ui/badge"
-import { ArrowLeft, Camera, MapPin, Send, CheckCircle } from "lucide-react"
+import { ArrowLeft, Camera, MapPin, Send, CheckCircle, LoaderCircle } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
 import { supabase } from "@/integrations/supabase/client"
-import { indianStates, getCitiesByState } from "@/data/indianStatesAndCities"
+import { cn } from "@/lib/utils"
 
 interface ComplaintRegistrationProps {
   onBack: () => void
@@ -19,225 +19,154 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
   const [step, setStep] = useState<'form' | 'success'>('form')
   const [complaintId, setComplaintId] = useState<string>('')
   const { toast } = useToast()
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+
 
   const [formData, setFormData] = useState({
     state: '',
     city: '',
-    district: '',
     issueType: '',
     description: '',
-    media: null as File | null,
-    gpsLocation: null as { lat: number; lng: number } | null,
-    addressLine1: '',
-    addressLine2: ''
+    media: null as File | null
   })
 
-  const [availableCities, setAvailableCities] = useState<string[]>([])
-  const [isAnalyzing, setIsAnalyzing] = useState(false)
-
   const issueTypes = [
-    { value: 'Electricity', label: '⚡ Electricity', category: 'Utilities' },
-    { value: 'Water Supply', label: '💧 Water Supply', category: 'Utilities' },
-    { value: 'Garbage Collection', label: '🗑️ Garbage Collection', category: 'Sanitation' },
-    { value: 'Road Repair', label: '🕳️ Road Repair', category: 'Infrastructure' },
-    { value: 'Street Light', label: '🔦 Street Light', category: 'Infrastructure' },
-    { value: 'Public Transport', label: '🚌 Public Transport', category: 'Transport' },
-    { value: 'Noise Pollution', label: '🔊 Noise Pollution', category: 'Environment' },
-    { value: 'Others', label: '📝 Others', category: 'General' }
+    { value: 'streetlight', label: '🔦 Street Light Issues', category: 'Infrastructure' },
+    { value: 'pothole', label: '🕳️ Pothole/Road Damage', category: 'Roads' },
+    { value: 'garbage', label: '🗑️ Garbage Collection', category: 'Sanitation' },
+    { value: 'drainage', label: '🌊 Drainage Problems', category: 'Water' },
+    { value: 'water', label: '💧 Water Supply Issues', category: 'Water' },
+    { value: 'electricity', label: '⚡ Power Outage', category: 'Utilities' },
+    { value: 'noise', label: '🔊 Noise Pollution', category: 'Environment' },
+    { value: 'others', label: '📝 Other Issues', category: 'General' }
   ]
 
-  const handleStateChange = (state: string) => {
-    setFormData(prev => ({ ...prev, state, city: '', district: '' }))
-    setAvailableCities(getCitiesByState(state))
-  }
+  const states = [
+    'Andhra Pradesh', 'Karnataka', 'Maharashtra', 'Tamil Nadu', 'Gujarat', 
+    'Rajasthan', 'West Bengal', 'Delhi', 'Others'
+  ]
+
+
+  const handleMediaUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (!formData.issueType) {
+        toast({
+            title: "Please select an issue type first",
+            description: "The AI needs to know what kind of issue to look for.",
+            variant: "destructive"
+        });
+        e.target.value = ''; // Reset file input
+        return;
+    }
+
+    setFormData(prev => ({ ...prev, media: file, description: '' })); // Clear previous description
+    setIsAnalyzing(true);
+
+    const reader = new FileReader();
+    reader.readAsDataURL(file);
+    reader.onloadend = async () => {
+        const base64data = reader.result?.toString().split(',')[1];
+
+        try {
+            const { data, error } = await supabase.functions.invoke('analyze-complaint-image', {
+                body: { imageData: base64data, issueType: formData.issueType },
+            });
+
+            if (error) throw error;
+            
+            if (data.is_relevant) {
+                setFormData(prev => ({ ...prev, description: data.description }));
+                toast({
+                    title: "Image Analyzed Successfully",
+                    description: "An AI-generated description has been added.",
+                });
+            } else {
+                setFormData(prev => ({ ...prev, media: null })); // Clear invalid media
+                e.target.value = ''; // Reset file input
+                toast({
+                    title: "Irrelevant Image Detected",
+                    description: data.reason || "Please upload an image related to the selected issue.",
+                    variant: "destructive"
+                });
+            }
+        } catch (err) {
+            console.error('Error analyzing image:', err);
+            toast({
+                title: "AI Analysis Failed",
+                description: "Could not analyze the image. Please write a description manually.",
+                variant: "destructive"
+            });
+        } finally {
+            setIsAnalyzing(false);
+        }
+    };
+  };
 
   const handleSubmit = async () => {
     if (!formData.state || !formData.city || !formData.issueType || !formData.description) {
-      toast({
-        title: "Missing Information",
-        description: "Please fill all required fields",
-        variant: "destructive"
-      })
-      return
-    }
-
-    try {
-      let mediaUrl = null
-
-      // Upload media if provided
-      if (formData.media) {
-        const fileExt = formData.media.name.split('.').pop()
-        const fileName = `${Date.now()}.${fileExt}`
-        
-        const { data: uploadData, error: uploadError } = await supabase.storage
-          .from('complaints')
-          .upload(fileName, formData.media)
-
-        if (uploadError) throw uploadError
-        
-        const { data: { publicUrl } } = supabase.storage
-          .from('complaints')
-          .getPublicUrl(fileName)
-        
-        mediaUrl = publicUrl
+        toast({
+          title: "Missing Information",
+          description: "Please fill all required fields",
+          variant: "destructive"
+        })
+        return
       }
-
-      // Auto-assign worker based on issue type
-      const { data: assignedWorkerId } = await supabase
-        .rpc('auto_assign_worker', { issue_type_param: formData.issueType })
-
-      // Insert complaint (complaint_code is auto-generated by trigger)
-      const { data, error } = await supabase
-        .from('complaints')
-        .insert({
-          state: formData.state,
-          city: formData.city, 
-          issue_type: formData.issueType,
-          description: formData.description,
-          severity_description: formData.description, // AI-generated description stored here
-          media_url: mediaUrl,
-          gps_latitude: formData.gpsLocation?.lat,
-          gps_longitude: formData.gpsLocation?.lng,
-          address_line1: formData.addressLine1,
-          address_line2: formData.addressLine2,
-          status: assignedWorkerId ? 'In-Progress' : 'Registered',
-          assigned_to: assignedWorkerId
-        } as any)
-        .select('id, complaint_code')
-        .single()
-
-      if (error) throw error
-
-      // Insert status update if worker assigned
-      if (assignedWorkerId) {
-        await supabase
-          .from('complaint_status_updates')
-          .insert({
-            complaint_id: data.id,
-            status: 'In-Progress',
-            note: 'Complaint auto-assigned to worker'
-          })
-      }
-
-      setComplaintId(data.complaint_code)
-      setStep('success')
-      
-      toast({
-        title: "Report Submitted Successfully! 🎉",
-        description: `Complaint ID: ${data.complaint_code}`,
-        variant: "default"
-      })
-    } catch (error) {
-      console.error('Error submitting complaint:', error)
-      toast({
-        title: "Submission Failed",
-        description: "Please try again later",
-        variant: "destructive"
-      })
-    }
-  }
-
-  const handleMediaUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (file) {
-      setFormData(prev => ({ ...prev, media: file }))
-      
-      // Get GPS location
-      if (navigator.geolocation) {
-        navigator.geolocation.getCurrentPosition(
-          (position) => {
-            setFormData(prev => ({
-              ...prev,
-              gpsLocation: {
-                lat: position.coords.latitude,
-                lng: position.coords.longitude
-              }
-            }))
-            toast({
-              title: "Location Captured",
-              description: "GPS coordinates recorded",
-              variant: "default"
-            })
-          },
-          (error) => {
-            console.log('GPS error:', error)
-            toast({
-              title: "Location Access",
-              description: "Unable to capture GPS location",
-              variant: "destructive"
-            })
-          }
-        )
-      }
-
-      // Auto-analyze media with AI if it's an image
-      if (file.type.startsWith('image/')) {
-        await analyzeMediaWithAI(file)
-      }
-
-      toast({
-        title: "Media Uploaded",
-        description: "Photo/video attached successfully",
-        variant: "default"
-      })
-    }
-  }
-
-  const analyzeMediaWithAI = async (file: File) => {
-    setIsAnalyzing(true)
-    try {
-      // Upload file to get URL for AI analysis
-      const fileExt = file.name.split('.').pop()
-      const fileName = `temp_${Date.now()}.${fileExt}`
-      
-      const { data: uploadData, error: uploadError } = await supabase.storage
-        .from('complaints')
-        .upload(fileName, file)
-
-      if (uploadError) throw uploadError
-      
-      const { data: { publicUrl } } = supabase.storage
-        .from('complaints')
-        .getPublicUrl(fileName)
-
-      // Call AI analysis function
-      const { data: analysisResult, error: analysisError } = await supabase.functions.invoke('analyze-media', {
-        body: { 
-          mediaUrl: publicUrl,
-          issueType: formData.issueType 
+      setIsSubmitting(true);
+      try {
+        let mediaUrl = null
+  
+        if (formData.media) {
+          const fileExt = formData.media.name.split('.').pop()
+          const fileName = `${Date.now()}.${fileExt}`
+          
+          const { data: uploadData, error: uploadError } = await supabase.storage
+            .from('complaints')
+            .upload(fileName, formData.media)
+  
+          if (uploadError) throw uploadError
+          
+          const { data: { publicUrl } } = supabase.storage
+            .from('complaints')
+            .getPublicUrl(fileName)
+          
+          mediaUrl = publicUrl
         }
-      })
-
-      if (analysisError) throw analysisError
-
-      if (analysisResult.success && analysisResult.description) {
-        setFormData(prev => ({ 
-          ...prev, 
-          description: analysisResult.description 
-        }))
+  
+        const { data, error } = await supabase
+          .from('complaints')
+          .insert({
+            state: formData.state,
+            city: formData.city, 
+            issue_type: formData.issueType,
+            description: formData.description,
+            media_url: mediaUrl
+          } as any)
+          .select('complaint_code')
+          .single()
+  
+        if (error) throw error
+  
+        setComplaintId(data.complaint_code)
+        setStep('success')
         
         toast({
-          title: "AI Analysis Complete",
-          description: "Description auto-generated from image",
+          title: "Report Submitted Successfully! 🎉",
+          description: `Complaint ID: ${data.complaint_code}`,
           variant: "default"
         })
+      } catch (error) {
+        console.error('Error submitting complaint:', error)
+        toast({
+          title: "Submission Failed",
+          description: "Please try again later",
+          variant: "destructive"
+        })
+      } finally {
+          setIsSubmitting(false);
       }
-
-      // Clean up temp file
-      await supabase.storage
-        .from('complaints')
-        .remove([fileName])
-
-    } catch (error) {
-      console.error('AI analysis error:', error)
-      toast({
-        title: "AI Analysis Failed",
-        description: "Please enter description manually",
-        variant: "destructive"
-      })
-    } finally {
-      setIsAnalyzing(false)
-    }
   }
 
   if (step === 'success') {
@@ -269,7 +198,7 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
 
               <div className="space-y-3">
                 <Button 
-                  variant="civic" 
+                  variant="default"
                   size="lg" 
                   className="w-full"
                   onClick={() => onBack()}
@@ -286,13 +215,9 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
                     setFormData({
                       state: '',
                       city: '',
-                      district: '',
                       issueType: '',
                       description: '',
-                      media: null,
-                      gpsLocation: null,
-                      addressLine1: '',
-                      addressLine2: ''
+                      media: null
                     })
                   }}
                 >
@@ -308,7 +233,6 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-civic-orange-light to-background">
-      {/* Header */}
       <div className="bg-white/90 backdrop-blur-sm shadow-sm border-b border-civic-saffron/20">
         <div className="flex items-center p-4 max-w-md mx-auto">
           <Button variant="ghost" size="icon" onClick={onBack} className="mr-3">
@@ -328,16 +252,33 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
           </CardHeader>
           
           <CardContent className="p-6 space-y-6">
-            {/* Location */}
             <div className="space-y-4">
+               <div>
+                <Label htmlFor="issueType">Issue Type *</Label>
+                <Select value={formData.issueType} onValueChange={(value) => setFormData(prev => ({...prev, issueType: value}))}>
+                  <SelectTrigger id="issueType">
+                    <SelectValue placeholder="Select issue type" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {issueTypes.map(issue => (
+                      <SelectItem key={issue.value} value={issue.value}>
+                        <div className="flex items-center justify-between w-full">
+                          <span>{issue.label}</span>
+                          <Badge variant="secondary" className="ml-2">{issue.category}</Badge>
+                        </div>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
               <div>
                 <Label htmlFor="state">State / UT *</Label>
-                <Select value={formData.state} onValueChange={handleStateChange}>
-                  <SelectTrigger>
+                <Select value={formData.state} onValueChange={(value) => setFormData(prev => ({...prev, state: value}))}>
+                  <SelectTrigger id="state">
                     <SelectValue placeholder="Select your state" />
                   </SelectTrigger>
                   <SelectContent>
-                    {indianStates.map(state => (
+                    {states.map(state => (
                       <SelectItem key={state} value={state}>{state}</SelectItem>
                     ))}
                   </SelectContent>
@@ -345,133 +286,61 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
               </div>
 
               <div>
-                <Label htmlFor="city">City *</Label>
-                <Select 
-                  value={formData.city} 
-                  onValueChange={(value) => setFormData(prev => ({...prev, city: value}))}
-                  disabled={!formData.state}
-                >
-                  <SelectTrigger>
-                    <SelectValue placeholder={formData.state ? "Select your city" : "Please select state first"} />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {availableCities.map(city => (
-                      <SelectItem key={city} value={city}>{city}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div>
-                <Label htmlFor="district">District (Optional*)</Label>
-                <Input 
-                  placeholder="Enter district name (if applicable)"
-                  value={formData.district}
-                  onChange={(e) => setFormData(prev => ({...prev, district: e.target.value}))}
+                <Label htmlFor="city">City / District *</Label>
+                <Input
+                  id="city" 
+                  placeholder="Enter city or district"
+                  value={formData.city}
+                  onChange={(e) => setFormData(prev => ({...prev, city: e.target.value}))}
                 />
               </div>
             </div>
 
-            {/* Issue Type */}
             <div>
-              <Label>Issue Type *</Label>
-              <Select value={formData.issueType} onValueChange={(value) => setFormData(prev => ({...prev, issueType: value}))}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Select issue type" />
-                </SelectTrigger>
-                <SelectContent>
-                  {issueTypes.map(issue => (
-                    <SelectItem key={issue.value} value={issue.value}>
-                      <div className="flex items-center justify-between w-full">
-                        <span>{issue.label}</span>
-                        <Badge variant="secondary" className="ml-2">{issue.category}</Badge>
-                      </div>
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-
-            {/* Media Upload - Enhanced with GPS and Address */}
-            <div>
-              <Label>Upload Photo/Video (Optional)</Label>
+              <Label>Upload Photo (Optional)</Label>
               <div className="border-2 border-dashed border-civic-saffron/30 rounded-lg p-4 text-center hover:border-civic-saffron/50 transition-colors">
                 <input
                   type="file"
-                  accept="image/*,video/*"
+                  accept="image/*"
                   onChange={handleMediaUpload}
                   className="hidden"
                   id="media-upload"
+                  disabled={isAnalyzing}
                 />
-                <label htmlFor="media-upload" className="cursor-pointer">
-                  <Camera className="h-8 w-8 text-civic-saffron mx-auto mb-2" />
-                  <p className="text-sm text-muted-foreground">
-                    {formData.media ? formData.media.name : 'Tap to add photo or video'}
-                  </p>
-                  <p className="text-xs text-civic-saffron mt-1">
-                    GPS location and AI analysis will be automatically applied
-                  </p>
-                  {isAnalyzing && (
-                    <p className="text-xs text-blue-600 mt-1 font-medium">
-                      🤖 AI analyzing image...
-                    </p>
+                <label htmlFor="media-upload" className={cn("cursor-pointer", isAnalyzing && "cursor-not-allowed")}>
+                  {isAnalyzing ? (
+                      <LoaderCircle className="h-8 w-8 text-civic-saffron mx-auto mb-2 animate-spin" />
+                  ) : (
+                      <Camera className="h-8 w-8 text-civic-saffron mx-auto mb-2" />
                   )}
+                  <p className="text-sm text-muted-foreground">
+                    {isAnalyzing ? "Analyzing..." : formData.media ? formData.media.name : 'Tap to add photo'}
+                  </p>
+                  <p className="text-xs text-civic-saffron mt-1">AI will generate a description for you</p>
                 </label>
-              </div>
-
-              {/* GPS Location Display */}
-              {formData.gpsLocation && (
-                <div className="mt-2 p-2 bg-green-50 rounded text-xs">
-                  📍 GPS: {formData.gpsLocation.lat.toFixed(6)}, {formData.gpsLocation.lng.toFixed(6)}
-                </div>
-              )}
-
-              {/* Address Fields */}
-              <div className="mt-4 space-y-3">
-                <div>
-                  <Label htmlFor="address1">Address Line 1 (Optional)</Label>
-                  <Input 
-                    id="address1"
-                    placeholder="Street address, building name, etc."
-                    value={formData.addressLine1}
-                    onChange={(e) => setFormData(prev => ({...prev, addressLine1: e.target.value}))}
-                  />
-                </div>
-                <div>
-                  <Label htmlFor="address2">Address Line 2 (Optional)</Label>
-                  <Input 
-                    id="address2"
-                    placeholder="Landmark, area, etc."
-                    value={formData.addressLine2}
-                    onChange={(e) => setFormData(prev => ({...prev, addressLine2: e.target.value}))}
-                  />
-                </div>
               </div>
             </div>
 
-            {/* Description - Enhanced with AI auto-generation */}
             <div>
               <Label htmlFor="description">Detailed Description *</Label>
-              <Textarea 
-                placeholder={isAnalyzing ? "AI is analyzing your image..." : "Describe the issue in detail or let AI analyze your uploaded image..."}
+              <Textarea
+                id="description"
+                placeholder={isAnalyzing ? "AI is analyzing the image..." : "Describe the issue or let AI do it for you."}
                 rows={4}
                 value={formData.description}
                 onChange={(e) => setFormData(prev => ({...prev, description: e.target.value}))}
                 disabled={isAnalyzing}
               />
-              <p className="text-xs text-muted-foreground mt-1">
-                📱 Tip: Upload an image first for AI-powered description generation
-              </p>
             </div>
 
             <Button 
-              variant="civic" 
               size="xl" 
               className="w-full"
               onClick={handleSubmit}
+              disabled={isSubmitting || isAnalyzing}
             >
-              <Send className="h-5 w-5 mr-2" />
-              Submit Report
+              {isSubmitting ? <LoaderCircle className="animate-spin mr-2" /> : <Send className="h-5 w-5 mr-2" />}
+              {isSubmitting ? "Submitting..." : "Submit Report"}
             </Button>
           </CardContent>
         </Card>
@@ -480,4 +349,5 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
   )
 }
 
-export default ComplaintRegistration
+export default ComplaintRegistration;
+

@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 Welcome to Nagar Rakshak
 Project info
 
@@ -70,3 +71,6 @@ Yes, you can!
 
 To connect a custom domain, go to your Netlify dashboard, navigate to Domain settings, and add your custom domain.
 Read more here: Netlify Docs – Custom Domains
+=======
+# Nagar-Rakshak-3
+>>>>>>> 797333e40a1a95d537db1b0fe7431d4d400dccf7
