@@ -10,6 +10,8 @@ import { ArrowLeft, Camera, MapPin, Send, CheckCircle, LoaderCircle } from "luci
 import { useToast } from "@/hooks/use-toast"
 import { supabase } from "@/integrations/supabase/client"
 import { cn } from "@/lib/utils"
+import { indianStates, getCitiesByState } from "@/data/indianStatesAndCities"
+import { useRef } from "react"
 
 interface ComplaintRegistrationProps {
   onBack: () => void
@@ -21,14 +23,23 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
   const { toast } = useToast()
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+  const audioChunksRef = useRef<BlobPart[]>([])
+  const cameraInputRef = useRef<HTMLInputElement | null>(null)
+  const galleryInputRef = useRef<HTMLInputElement | null>(null)
 
 
   const [formData, setFormData] = useState({
     state: '',
     city: '',
+    district: '',
+    address1: '',
+    address2: '',
     issueType: '',
     description: '',
-    media: null as File | null
+    media: null as File | null,
+    audio: null as File | null
   })
 
   const issueTypes = [
@@ -42,10 +53,20 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
     { value: 'others', label: '📝 Other Issues', category: 'General' }
   ]
 
-  const states = [
-    'Andhra Pradesh', 'Karnataka', 'Maharashtra', 'Tamil Nadu', 'Gujarat', 
-    'Rajasthan', 'West Bengal', 'Delhi', 'Others'
-  ]
+  const states = indianStates
+  const cities = formData.state ? getCitiesByState(formData.state) : []
+
+  const mapAuthorityForIssue = (issue: string): string | null => {
+    const normalized = (issue || '').toLowerCase()
+    if (normalized.includes('electric')) return 'Electricity Department'
+    if (normalized.includes('water') || normalized.includes('drain')) return 'Jal Board / Water Supply Department'
+    if (normalized.includes('garbage')) return 'Nagar Nigam / Municipal Corporation'
+    if (normalized.includes('pothole') || normalized.includes('road')) return 'Public Works Department (PWD)'
+    if (normalized.includes('street')) return 'Nagar Nigam / Municipal Corporation (Street Lighting Division)'
+    if (normalized.includes('transport')) return 'Local Transport Authority / RTO'
+    if (normalized.includes('noise')) return 'Pollution Control Board / Local Police Authority'
+    return null
+  }
 
 
   const handleMediaUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -105,6 +126,37 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
     };
   };
 
+  const handleStartRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const mediaRecorder = new MediaRecorder(stream)
+      mediaRecorderRef.current = mediaRecorder
+      audioChunksRef.current = []
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) audioChunksRef.current.push(event.data)
+      }
+      mediaRecorder.onstop = () => {
+        const blob = new Blob(audioChunksRef.current, { type: 'audio/webm' })
+        const file = new File([blob], `voice-${Date.now()}.webm`, { type: 'audio/webm' })
+        setFormData(prev => ({ ...prev, audio: file }))
+        // stop tracks
+        stream.getTracks().forEach(t => t.stop())
+      }
+      mediaRecorder.start()
+      setIsRecording(true)
+    } catch (err) {
+      console.error('Audio recording error:', err)
+      toast({ title: 'Microphone access denied', variant: 'destructive' })
+    }
+  }
+
+  const handleStopRecording = () => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop()
+      setIsRecording(false)
+    }
+  }
+
   const handleSubmit = async () => {
     if (!formData.state || !formData.city || !formData.issueType || !formData.description) {
         toast({
@@ -117,6 +169,7 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
       setIsSubmitting(true);
       try {
         let mediaUrl = null
+        let audioUrl = null
   
         if (formData.media) {
           const fileExt = formData.media.name.split('.').pop()
@@ -140,16 +193,37 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
           .insert({
             state: formData.state,
             city: formData.city, 
+            address_line1: formData.address1 || null,
+            address_line2: (formData.district ? `${formData.district}${formData.address2 ? ', ' + formData.address2 : ''}` : (formData.address2 || null)),
             issue_type: formData.issueType,
             description: formData.description,
-            media_url: mediaUrl
+            media_url: mediaUrl,
+            voice_note_url: audioUrl
           } as any)
-          .select('complaint_code')
+          .select('id, complaint_code, issue_type, city, state')
           .single()
   
         if (error) throw error
   
         setComplaintId(data.complaint_code)
+
+        // Auto-assign routing based on issue type
+        const authority = mapAuthorityForIssue(formData.issueType)
+        if (authority) {
+          await supabase
+            .from('complaints')
+            .update({ status: 'Assigned' as any, assigned_to: authority })
+            .eq('id', (data as any).id)
+
+          await supabase
+            .from('complaint_status_updates')
+            .insert({
+              complaint_id: (data as any).id,
+              status: 'Assigned' as any,
+              assigned_to: authority,
+              note: `Auto-routed based on issue type: ${formData.issueType}`
+            } as any)
+        }
         setStep('success')
         
         toast({
@@ -215,9 +289,13 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
                     setFormData({
                       state: '',
                       city: '',
+                      district: '',
+                      address1: '',
+                      address2: '',
                       issueType: '',
                       description: '',
-                      media: null
+                      media: null,
+                      audio: null
                     })
                   }}
                 >
@@ -273,7 +351,7 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
               </div>
               <div>
                 <Label htmlFor="state">State / UT *</Label>
-                <Select value={formData.state} onValueChange={(value) => setFormData(prev => ({...prev, state: value}))}>
+                <Select value={formData.state} onValueChange={(value) => setFormData(prev => ({...prev, state: value, city: ''}))}>
                   <SelectTrigger id="state">
                     <SelectValue placeholder="Select your state" />
                   </SelectTrigger>
@@ -286,12 +364,44 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
               </div>
 
               <div>
-                <Label htmlFor="city">City / District *</Label>
+                <Label htmlFor="city">City *</Label>
+                <Select value={formData.city} onValueChange={(value) => setFormData(prev => ({...prev, city: value}))}>
+                  <SelectTrigger id="city">
+                    <SelectValue placeholder={formData.state ? "Select your city" : "Select state first"} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {cities.map(city => (
+                      <SelectItem key={city} value={city}>{city}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div>
+                <Label htmlFor="district">District (Optional)</Label>
                 <Input
-                  id="city" 
-                  placeholder="Enter city or district"
-                  value={formData.city}
-                  onChange={(e) => setFormData(prev => ({...prev, city: e.target.value}))}
+                  id="district"
+                  placeholder="Enter district (optional)"
+                  value={formData.district}
+                  onChange={(e) => setFormData(prev => ({...prev, district: e.target.value}))}
+                />
+              </div>
+              <div>
+                <Label htmlFor="address1">Address Line 1 (Optional)</Label>
+                <Input
+                  id="address1"
+                  placeholder="House no., Street, Landmark"
+                  value={formData.address1}
+                  onChange={(e) => setFormData(prev => ({...prev, address1: e.target.value}))}
+                />
+              </div>
+              <div>
+                <Label htmlFor="address2">Address Line 2 (Optional)</Label>
+                <Input
+                  id="address2"
+                  placeholder="Area, Locality"
+                  value={formData.address2}
+                  onChange={(e) => setFormData(prev => ({...prev, address2: e.target.value}))}
                 />
               </div>
             </div>
@@ -301,23 +411,90 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
               <div className="border-2 border-dashed border-civic-saffron/30 rounded-lg p-4 text-center hover:border-civic-saffron/50 transition-colors">
                 <input
                   type="file"
+                  accept="image/*;capture=camera"
+                  capture="environment"
+                  onChange={handleMediaUpload}
+                  className="hidden"
+                  id="media-upload-camera"
+                  ref={cameraInputRef}
+                  disabled={isAnalyzing}
+                />
+                <input
+                  type="file"
                   accept="image/*"
                   onChange={handleMediaUpload}
                   className="hidden"
-                  id="media-upload"
+                  id="media-upload-gallery"
+                  ref={galleryInputRef}
                   disabled={isAnalyzing}
                 />
-                <label htmlFor="media-upload" className={cn("cursor-pointer", isAnalyzing && "cursor-not-allowed")}>
+                <div className="flex items-center justify-center gap-2">
+                  <Button 
+                    type="button"
+                    variant="outline" 
+                    size="sm" 
+                    className="h-8 px-2"
+                    onClick={() => {
+                      if (cameraInputRef.current) {
+                        cameraInputRef.current.setAttribute('capture','environment')
+                        cameraInputRef.current.setAttribute('accept','image/*;capture=camera')
+                        cameraInputRef.current.click()
+                      }
+                    }}
+                    disabled={isAnalyzing}
+                  >
+                    Camera
+                  </Button>
+                  <Button 
+                    type="button"
+                    variant="outline" 
+                    size="sm" 
+                    className="h-8 px-2"
+                    onClick={() => galleryInputRef.current?.click()}
+                    disabled={isAnalyzing}
+                  >
+                    Gallery
+                  </Button>
+                </div>
+                <div className="mt-2">
                   {isAnalyzing ? (
-                      <LoaderCircle className="h-8 w-8 text-civic-saffron mx-auto mb-2 animate-spin" />
+                    <LoaderCircle className="h-5 w-5 text-civic-saffron mx-auto mb-1 animate-spin" />
                   ) : (
-                      <Camera className="h-8 w-8 text-civic-saffron mx-auto mb-2" />
+                    <Camera className="h-5 w-5 text-civic-saffron mx-auto mb-1" />
                   )}
-                  <p className="text-sm text-muted-foreground">
-                    {isAnalyzing ? "Analyzing..." : formData.media ? formData.media.name : 'Tap to add photo'}
+                  <p className="text-xs text-muted-foreground">
+                    {isAnalyzing ? "Analyzing..." : formData.media ? formData.media.name : 'Use Camera or Gallery to add photo'}
                   </p>
-                  <p className="text-xs text-civic-saffron mt-1">AI will generate a description for you</p>
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <Label>Upload / Record Audio (Optional)</Label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="file"
+                  accept="audio/*"
+                  id="audio-upload"
+                  className="hidden"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0] || null
+                    setFormData(prev => ({ ...prev, audio: file }))
+                  }}
+                />
+                <label htmlFor="audio-upload">
+                  <Button variant="outline" size="sm" className="h-8 px-2">Upload</Button>
                 </label>
+                {!isRecording ? (
+                  <Button variant="outline" size="sm" className="h-8 px-2" onClick={handleStartRecording}>Record</Button>
+                ) : (
+                  <Button variant="destructive" size="sm" className="h-8 px-2" onClick={handleStopRecording}>Stop</Button>
+                )}
+                {formData.audio && (
+                  <audio controls className="h-8">
+                    <source src={URL.createObjectURL(formData.audio)} />
+                  </audio>
+                )}
               </div>
             </div>
 

@@ -6,7 +6,8 @@ import { Input } from "./ui/input.tsx"
 import { Label } from "./ui/label.tsx"
 import { Textarea } from "./ui/textarea.tsx"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select.tsx"
-import { ArrowLeft, BarChart3, MapPin, Users, Clock, CheckCircle, AlertTriangle, Filter, User } from "lucide-react"
+import { ArrowLeft, BarChart3, MapPin, Users, Clock, CheckCircle, AlertTriangle, Filter, User, Pencil } from "lucide-react"
+import { ResponsiveContainer, BarChart as RBarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, Legend } from "recharts"
 import { useState, useEffect } from "react"
 import { supabase } from "../integrations/supabase/client.ts"
 import { useToast } from "../hooks/use-toast.ts"
@@ -19,13 +20,16 @@ const AdminPortal = ({ onBack }: AdminPortalProps) => {
   const [complaints, setComplaints] = useState<any[]>([])
   const [stats, setStats] = useState({ pending: 0, inProgress: 0, resolved: 0, total: 0 })
   const [loading, setLoading] = useState(true)
+  const [filters, setFilters] = useState<{ issue?: string; city?: string; from?: string; to?: string }>({})
   const [assignDialogOpen, setAssignDialogOpen] = useState(false)
   const [selectedComplaint, setSelectedComplaint] = useState<any>(null)
+  const [authorityName, setAuthorityName] = useState("")
   const [workerName, setWorkerName] = useState("")
   const [workerContact, setWorkerContact] = useState("")
   const [statusNote, setStatusNote] = useState("")
   const [newStatus, setNewStatus] = useState("")
   const { toast } = useToast()
+  const [latestAssignments, setLatestAssignments] = useState<Record<string, { worker?: string | null; contact?: string | null }>>({})
 
   useEffect(() => {
     fetchComplaints()
@@ -51,10 +55,32 @@ const AdminPortal = ({ onBack }: AdminPortalProps) => {
         .from('complaints')
         .select('*')
         .order('created_at', { ascending: false })
-        .limit(10)
+        .limit(1000)
 
       if (error) throw error
-      setComplaints(data || [])
+      const list = data || []
+      setComplaints(list)
+      // Fetch latest worker assignment per complaint
+      const ids = list.map((c: any) => c.id)
+      if (ids.length > 0) {
+        const { data: updates, error: updatesErr } = await supabase
+          .from('complaint_status_updates')
+          .select('complaint_id, assigned_to, assigned_contact, created_at')
+          .in('complaint_id', ids)
+          .order('created_at', { ascending: false })
+
+        if (!updatesErr && updates) {
+          const map: Record<string, { worker?: string | null; contact?: string | null }> = {}
+          for (const u of updates) {
+            if (!map[u.complaint_id] && (u.assigned_to || u.assigned_contact)) {
+              map[u.complaint_id] = { worker: u.assigned_to, contact: u.assigned_contact }
+            }
+          }
+          setLatestAssignments(map)
+        }
+      } else {
+        setLatestAssignments({})
+      }
     } catch (error) {
       console.error('Error fetching complaints:', error)
       toast({ title: "Error fetching complaints", variant: "destructive" })
@@ -97,7 +123,7 @@ const AdminPortal = ({ onBack }: AdminPortalProps) => {
         .from('complaints')
         .update({ 
           status: newStatus as any,
-          assigned_to: workerName 
+          assigned_to: authorityName 
         })
         .eq('id', selectedComplaint.id)
 
@@ -127,6 +153,7 @@ const AdminPortal = ({ onBack }: AdminPortalProps) => {
       setStatusNote("")
       setNewStatus("")
       setSelectedComplaint(null)
+      setAuthorityName("")
 
     } catch (error) {
       console.error('Error assigning worker:', error)
@@ -137,7 +164,8 @@ const AdminPortal = ({ onBack }: AdminPortalProps) => {
   const openAssignDialog = (complaint: any) => {
     setSelectedComplaint(complaint)
     setNewStatus(complaint.status || "")
-    setWorkerName(complaint.assigned_to || "")
+    setAuthorityName(complaint.assigned_to || "")
+    setWorkerName(latestAssignments[complaint.id]?.worker || "")
     setAssignDialogOpen(true)
   }
 
@@ -150,6 +178,47 @@ const AdminPortal = ({ onBack }: AdminPortalProps) => {
       default: return 'bg-muted text-muted-foreground'
     }
   }
+
+  // Derived datasets
+  const filteredComplaints = complaints.filter((c) => {
+    const matchIssue = filters.issue ? (c.issue_type || '').toLowerCase().includes(filters.issue.toLowerCase()) : true
+    const matchCity = filters.city ? (c.city || '').toLowerCase().includes(filters.city.toLowerCase()) : true
+    const created = c.created_at ? new Date(c.created_at) : null
+    const fromOk = filters.from && created ? created >= new Date(filters.from) : true
+    const toOk = filters.to && created ? created <= new Date(filters.to) : true
+    return matchIssue && matchCity && fromOk && toOk
+  })
+
+  const byIssueType = Object.values(
+    filteredComplaints.reduce((acc: any, c: any) => {
+      const key = (c.issue_type || 'Unknown')
+      acc[key] = acc[key] || { name: key, count: 0 }
+      acc[key].count += 1
+      return acc
+    }, {})
+  ).sort((a: any, b: any) => b.count - a.count)
+
+  const byCity = Object.values(
+    filteredComplaints.reduce((acc: any, c: any) => {
+      const key = (c.city || 'Unknown')
+      acc[key] = acc[key] || { name: key, count: 0 }
+      acc[key].count += 1
+      return acc
+    }, {})
+  ).sort((a: any, b: any) => b.count - a.count)
+
+  const topCities = byCity.slice(0, 10)
+
+  // Comparison dataset: for top 5 cities, counts per top 5 issue types
+  const topIssueNames = byIssueType.slice(0, 5).map((d: any) => d.name)
+  const topCityNames = topCities.slice(0, 5).map((d: any) => d.name)
+  const comparison = topCityNames.map((city: string) => {
+    const row: any = { city }
+    topIssueNames.forEach((issue) => {
+      row[issue] = filteredComplaints.filter((c) => (c.city || 'Unknown') === city && (c.issue_type || 'Unknown') === issue).length
+    })
+    return row
+  })
 
   return (
     <>
@@ -208,7 +277,101 @@ const AdminPortal = ({ onBack }: AdminPortalProps) => {
             </Card>
           </div>
 
-          {/* Quick Actions */}
+          {/* Analytics Dashboard */}
+          <div className="grid md:grid-cols-3 gap-4 mb-6">
+            <Card className="border-civic-green/20">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <BarChart3 className="h-5 w-5 text-civic-green" />
+                  Complaints per Issue Type
+                </CardTitle>
+              </CardHeader>
+              <CardContent style={{ height: 220 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <RBarChart data={byIssueType} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis dataKey="name" hide={false} />
+                    <YAxis allowDecimals={false} />
+                    <Tooltip />
+                    <Bar dataKey="count" fill="#16a34a" />
+                  </RBarChart>
+                </ResponsiveContainer>
+              </CardContent>
+            </Card>
+
+            <Card className="border-civic-blue/20">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <MapPin className="h-5 w-5 text-civic-blue" />
+                  Complaints per Area/District
+                </CardTitle>
+              </CardHeader>
+              <CardContent style={{ height: 220 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <RBarChart data={topCities} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis dataKey="name" hide={false} />
+                    <YAxis allowDecimals={false} />
+                    <Tooltip />
+                    <Bar dataKey="count" fill="#2563eb" />
+                  </RBarChart>
+                </ResponsiveContainer>
+              </CardContent>
+            </Card>
+
+            <Card className="border-civic-saffron/20">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <BarChart3 className="h-5 w-5 text-civic-saffron" />
+                  Complaint Trend Comparison (Issue vs Area)
+                </CardTitle>
+              </CardHeader>
+              <CardContent style={{ height: 220 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <RBarChart data={comparison} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis dataKey="city" />
+                    <YAxis allowDecimals={false} />
+                    <Tooltip />
+                    <Legend />
+                    {topIssueNames.map((issue, idx) => (
+                      <Bar key={issue} dataKey={issue} stackId="a" fill={["#f59e0b", "#10b981", "#3b82f6", "#ef4444", "#8b5cf6"][idx % 5]} />
+                    ))}
+                  </RBarChart>
+                </ResponsiveContainer>
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* Complaint Management - Filters */}
+          <Card className="border-civic-blue/20 mb-8">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Filter className="h-5 w-5 text-civic-blue" />
+                Complaint Management Filters
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                <div>
+                  <Label htmlFor="issue-filter">Issue Type</Label>
+                  <Input id="issue-filter" placeholder="e.g., water, road, garbage" value={filters.issue || ''} onChange={(e) => setFilters((f) => ({ ...f, issue: e.target.value }))} />
+                </div>
+                <div>
+                  <Label htmlFor="city-filter">Area / District</Label>
+                  <Input id="city-filter" placeholder="e.g., Delhi" value={filters.city || ''} onChange={(e) => setFilters((f) => ({ ...f, city: e.target.value }))} />
+                </div>
+                <div>
+                  <Label htmlFor="from-date">From</Label>
+                  <Input id="from-date" type="date" value={filters.from || ''} onChange={(e) => setFilters((f) => ({ ...f, from: e.target.value }))} />
+                </div>
+                <div>
+                  <Label htmlFor="to-date">To</Label>
+                  <Input id="to-date" type="date" value={filters.to || ''} onChange={(e) => setFilters((f) => ({ ...f, to: e.target.value }))} />
+                </div>
+              </div>
+            </CardContent>
+          </Card>
           <div className="grid md:grid-cols-3 gap-4 mb-8">
             <Card className="cursor-pointer hover:shadow-lg transition-shadow border-civic-saffron/20">
               <CardContent className="p-6 text-center">
@@ -235,11 +398,11 @@ const AdminPortal = ({ onBack }: AdminPortalProps) => {
             </Card>
           </div>
 
-          {/* Recent Complaints */}
+          {/* Complaint Management View (Filtered List) */}
           <Card className="border-civic-saffron/20">
             <CardHeader>
               <CardTitle className="flex items-center justify-between">
-                <span>Recent Complaints</span>
+                <span>Complaints</span>
                 <Button variant="outline" size="sm" className="border-civic-saffron text-civic-saffron">
                   View All
                 </Button>
@@ -249,10 +412,10 @@ const AdminPortal = ({ onBack }: AdminPortalProps) => {
               <div className="space-y-4">
                 {loading ? (
                   <div className="text-center py-8">Loading complaints...</div>
-                ) : complaints.length === 0 ? (
+                ) : filteredComplaints.length === 0 ? (
                   <div className="text-center py-8 text-muted-foreground">No complaints found</div>
                 ) : (
-                  complaints.map((complaint) => (
+                  filteredComplaints.map((complaint) => (
                     <div key={complaint.id} className="flex items-center justify-between p-4 bg-muted/20 rounded-lg">
                       <div className="flex-1">
                         <div className="flex items-center gap-2 mb-2">
@@ -273,9 +436,20 @@ const AdminPortal = ({ onBack }: AdminPortalProps) => {
                             {complaint.status}
                           </Badge>
                           {complaint.assigned_to && (
+                            <div className="flex items-center gap-1">
+                              <Badge variant="outline" className="text-xs flex items-center gap-1">
+                                <User className="h-3 w-3" />
+                                Authority: {complaint.assigned_to}
+                              </Badge>
+                              <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => openAssignDialog(complaint)}>
+                                <Pencil className="h-3 w-3" />
+                              </Button>
+                            </div>
+                          )}
+                          {latestAssignments[complaint.id]?.worker && (
                             <Badge variant="outline" className="text-xs flex items-center gap-1">
                               <User className="h-3 w-3" />
-                              {complaint.assigned_to}
+                              Worker: {latestAssignments[complaint.id]?.worker}
                             </Badge>
                           )}
                         </div>
@@ -283,6 +457,18 @@ const AdminPortal = ({ onBack }: AdminPortalProps) => {
                         <p className="text-xs text-muted-foreground mt-2 line-clamp-2">
                           {complaint.description}
                         </p>
+                        {complaint.voice_note_url && (
+                          <div className="mt-2">
+                            <audio controls className="w-full">
+                              <source src={complaint.voice_note_url} />
+                            </audio>
+                          </div>
+                        )}
+                        {complaint.media_url && (
+                          <div className="mt-2">
+                            <img src={complaint.media_url} alt="evidence" className="max-h-40 rounded" />
+                          </div>
+                        )}
                       </div>
 
                       <div className="flex flex-col gap-2">

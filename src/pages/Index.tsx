@@ -1,10 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import SplashScreen from "../components/SplashScreen.tsx";
 import Dashboard from "../components/Dashboard.tsx";
 import ComplaintRegistration from "../components/ComplaintRegistration.tsx";
 import ComplaintTracking from "../components/ComplaintTracking.tsx";
 import HelplineNumbers from "../components/HelplineNumbers.tsx";
 import AdminPortal from "../components/AdminPortal.tsx";
+import AdminLogin from "../components/AdminLogin.tsx";
 import Signup from "../components/Signup.tsx";
 
 
@@ -17,6 +18,11 @@ export const nextScreenAfterBack = (current: string): 'dashboard' | 'splash' => 
 
 const Index = () => {
   const [currentScreen, setCurrentScreen] = useState<string>('splash');
+  const [isAdminAuthed, setIsAdminAuthed] = useState<boolean>(false);
+
+  useEffect(() => {
+    setIsAdminAuthed(localStorage.getItem('nr_admin_auth') === 'true');
+  }, []);
 
   const handleNavigation = (screen: string) => {
     setCurrentScreen(screen);
@@ -48,7 +54,9 @@ const Index = () => {
         return <HelplineNumbers onBack={handleBack} />;
 
       case 'admin':
-        return <AdminPortal onBack={handleBack} />;
+        return isAdminAuthed
+          ? <AdminPortal onBack={handleBack} />
+          : <AdminLogin onBack={() => setCurrentScreen('splash')} onSuccess={() => { setIsAdminAuthed(true); setCurrentScreen('admin'); }} />;
 
       default:
         return <SplashScreen onNavigate={handleNavigation} />;
