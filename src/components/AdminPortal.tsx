@@ -6,8 +6,9 @@ import { Input } from "./ui/input.tsx"
 import { Label } from "./ui/label.tsx"
 import { Textarea } from "./ui/textarea.tsx"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select.tsx"
-import { ArrowLeft, BarChart3, MapPin, Users, Clock, CheckCircle, AlertTriangle, Filter, User, Pencil } from "lucide-react"
+import { ArrowLeft, BarChart3, MapPin, Users, Clock, CheckCircle, AlertTriangle, Filter, User, Pencil, Map } from "lucide-react"
 import { ResponsiveContainer, BarChart as RBarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, Legend } from "recharts"
+import ComplaintMap from "./ComplaintMap"
 import { useState, useEffect } from "react"
 import { supabase } from "../integrations/supabase/client.ts"
 import { useToast } from "../hooks/use-toast.ts"
@@ -22,6 +23,8 @@ const AdminPortal = ({ onBack }: AdminPortalProps) => {
   const [loading, setLoading] = useState(true)
   const [filters, setFilters] = useState<{ issue?: string; city?: string; from?: string; to?: string }>({})
   const [assignDialogOpen, setAssignDialogOpen] = useState(false)
+  const [showMap, setShowMap] = useState(false)
+  const [mapComplaints, setMapComplaints] = useState<any[]>([])
   const [selectedComplaint, setSelectedComplaint] = useState<any>(null)
   const [authorityName, setAuthorityName] = useState("")
   const [workerName, setWorkerName] = useState("")
@@ -78,16 +81,29 @@ const AdminPortal = ({ onBack }: AdminPortalProps) => {
           }
           setLatestAssignments(map)
         }
-      } else {
-        setLatestAssignments({})
+        } else {
+          setLatestAssignments({})
+        }
+        
+        // Also fetch complaints with GPS coordinates for map
+        const { data: mapData, error: mapError } = await supabase
+          .from('complaints')
+          .select('id, complaint_code, issue_type, city, state, gps_latitude, gps_longitude, status, created_at')
+          .not('gps_latitude', 'is', null)
+          .not('gps_longitude', 'is', null)
+          .order('created_at', { ascending: false })
+          .limit(100)
+
+        if (!mapError) {
+          setMapComplaints(mapData || [])
+        }
+      } catch (error) {
+        console.error('Error fetching complaints:', error)
+        toast({ title: "Error fetching complaints", variant: "destructive" })
+      } finally {
+        setLoading(false)
       }
-    } catch (error) {
-      console.error('Error fetching complaints:', error)
-      toast({ title: "Error fetching complaints", variant: "destructive" })
-    } finally {
-      setLoading(false)
     }
-  }
 
   const fetchStats = async () => {
     try {
@@ -373,11 +389,17 @@ const AdminPortal = ({ onBack }: AdminPortalProps) => {
             </CardContent>
           </Card>
           <div className="grid md:grid-cols-3 gap-4 mb-8">
-            <Card className="cursor-pointer hover:shadow-lg transition-shadow border-civic-saffron/20">
+            <Card 
+              className="cursor-pointer hover:shadow-lg transition-shadow border-civic-saffron/20"
+              onClick={() => setShowMap(true)}
+            >
               <CardContent className="p-6 text-center">
                 <MapPin className="h-12 w-12 text-civic-saffron mx-auto mb-3" />
                 <h3 className="font-semibold mb-2">Live Complaint Map</h3>
                 <p className="text-sm text-muted-foreground">View complaints on GIS map</p>
+                <Badge variant="outline" className="mt-2">
+                  {mapComplaints.length} locations
+                </Badge>
               </CardContent>
             </Card>
 
@@ -551,6 +573,52 @@ const AdminPortal = ({ onBack }: AdminPortalProps) => {
               </Button>
             </div>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Map Dialog */}
+      <Dialog open={showMap} onOpenChange={setShowMap}>
+        <DialogContent className="max-w-4xl h-[600px]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Map className="h-5 w-5 text-civic-saffron" />
+              Live Complaint Map
+            </DialogTitle>
+          </DialogHeader>
+          <div className="flex-1">
+            <div className="h-full bg-muted/20 rounded-lg p-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 h-full">
+                <div className="space-y-2 overflow-y-auto">
+                  <h4 className="font-semibold">Complaints by Location ({mapComplaints.length})</h4>
+                  {mapComplaints.map((complaint) => (
+                    <div key={complaint.id} className="p-3 bg-white rounded-lg border">
+                      <div className="flex items-center justify-between mb-2">
+                        <h5 className="font-medium text-sm">{complaint.issue_type}</h5>
+                        <Badge className={getStatusColor(complaint.status)}>
+                          {complaint.status}
+                        </Badge>
+                      </div>
+                      <p className="text-xs text-muted-foreground mb-1">
+                        {complaint.complaint_code}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {complaint.city}, {complaint.state}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        📍 {complaint.gps_latitude?.toFixed(4)}, {complaint.gps_longitude?.toFixed(4)}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {new Date(complaint.created_at).toLocaleDateString()}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+                <div className="h-full">
+                  <ComplaintMap complaints={mapComplaints} />
+                </div>
+              </div>
+            </div>
+          </div>
         </DialogContent>
       </Dialog>
     </>

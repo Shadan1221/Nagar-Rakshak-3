@@ -6,12 +6,14 @@ import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Badge } from "@/components/ui/badge"
-import { ArrowLeft, Camera, MapPin, Send, CheckCircle, LoaderCircle } from "lucide-react"
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { ArrowLeft, Camera, MapPin, Send, CheckCircle, LoaderCircle, Navigation } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
 import { supabase } from "@/integrations/supabase/client"
 import { cn } from "@/lib/utils"
 import { indianStates, getCitiesByState } from "@/data/indianStatesAndCities"
 import { useRef } from "react"
+import { createComplaintNotifications } from "../services/notificationService"
 
 interface ComplaintRegistrationProps {
   onBack: () => void
@@ -24,6 +26,9 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
+  const [showLocationDialog, setShowLocationDialog] = useState(false);
+  const [location, setLocation] = useState<{lat: number, lng: number} | null>(null);
+  const [isGettingLocation, setIsGettingLocation] = useState(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const audioChunksRef = useRef<BlobPart[]>([])
   const cameraInputRef = useRef<HTMLInputElement | null>(null)
@@ -39,7 +44,9 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
     issueType: '',
     description: '',
     media: null as File | null,
-    audio: null as File | null
+    audio: null as File | null,
+    gpsLatitude: null as number | null,
+    gpsLongitude: null as number | null
   })
 
   const issueTypes = [
@@ -100,6 +107,7 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
             
             if (data.is_relevant) {
                 setFormData(prev => ({ ...prev, description: data.description }));
+                setShowLocationDialog(true);
                 toast({
                     title: "Image Analyzed Successfully",
                     description: "An AI-generated description has been added.",
@@ -157,6 +165,42 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
     }
   }
 
+  const getCurrentLocation = () => {
+    if (!navigator.geolocation) {
+      toast({ title: "Geolocation not supported", variant: "destructive" });
+      return;
+    }
+    setIsGettingLocation(true);
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const { latitude, longitude } = position.coords;
+        setLocation({ lat: latitude, lng: longitude });
+        setFormData(prev => ({ 
+          ...prev, 
+          gpsLatitude: latitude, 
+          gpsLongitude: longitude 
+        }));
+        setIsGettingLocation(false);
+        setShowLocationDialog(false);
+        toast({ title: "Location captured successfully!" });
+      },
+      (error) => {
+        console.error('Geolocation error:', error);
+        toast({ 
+          title: "Location access denied", 
+          description: "Please enable location access or enter manually",
+          variant: "destructive" 
+        });
+        setIsGettingLocation(false);
+      },
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
+    );
+  }
+
+  const skipLocation = () => {
+    setShowLocationDialog(false);
+  }
+
   const handleSubmit = async () => {
     if (!formData.state || !formData.city || !formData.issueType || !formData.description) {
         toast({
@@ -198,7 +242,9 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
             issue_type: formData.issueType,
             description: formData.description,
             media_url: mediaUrl,
-            voice_note_url: audioUrl
+            voice_note_url: audioUrl,
+            gps_latitude: formData.gpsLatitude,
+            gps_longitude: formData.gpsLongitude
           } as any)
           .select('id, complaint_code, issue_type, city, state')
           .single()
@@ -224,6 +270,14 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
               note: `Auto-routed based on issue type: ${formData.issueType}`
             } as any)
         }
+
+        // Create notifications for the complaint stages
+        await createComplaintNotifications(
+          (data as any).id,
+          data.complaint_code,
+          formData.issueType
+        )
+
         setStep('success')
         
         toast({
@@ -295,7 +349,9 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
                       issueType: '',
                       description: '',
                       media: null,
-                      audio: null
+                      audio: null,
+                      gpsLatitude: null,
+                      gpsLongitude: null
                     })
                   }}
                 >
@@ -521,6 +577,56 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
             </Button>
           </CardContent>
         </Card>
+
+        {/* Location Dialog */}
+        <Dialog open={showLocationDialog} onOpenChange={setShowLocationDialog}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <Navigation className="h-5 w-5 text-civic-saffron" />
+                Are you at the issue location?
+              </DialogTitle>
+            </DialogHeader>
+            <div className="space-y-4">
+              <p className="text-sm text-muted-foreground">
+                We can capture your exact GPS location to help authorities locate the issue precisely.
+              </p>
+              <div className="flex gap-2">
+                <Button 
+                  onClick={getCurrentLocation}
+                  disabled={isGettingLocation}
+                  className="flex-1"
+                >
+                  {isGettingLocation ? (
+                    <>
+                      <LoaderCircle className="h-4 w-4 mr-2 animate-spin" />
+                      Getting Location...
+                    </>
+                  ) : (
+                    <>
+                      <Navigation className="h-4 w-4 mr-2" />
+                      Yes, Get My Location
+                    </>
+                  )}
+                </Button>
+                <Button 
+                  variant="outline" 
+                  onClick={skipLocation}
+                  className="flex-1"
+                >
+                  Skip
+                </Button>
+              </div>
+              {location && (
+                <div className="bg-civic-green/10 p-3 rounded-lg">
+                  <p className="text-sm text-civic-green">
+                    ✓ Location captured: {location.lat.toFixed(6)}, {location.lng.toFixed(6)}
+                  </p>
+                </div>
+              )}
+            </div>
+          </DialogContent>
+        </Dialog>
       </div>
     </div>
   )

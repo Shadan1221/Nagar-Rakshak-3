@@ -2,6 +2,9 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { ArrowLeft, Plus, Search, Phone, BarChart3, Clock, CheckCircle, AlertTriangle } from "lucide-react"
+import { useState, useEffect } from "react"
+import { supabase } from "../integrations/supabase/client"
+import NotificationSystem from "./NotificationSystem"
 
 interface DashboardProps {
   onBack: () => void
@@ -9,6 +12,91 @@ interface DashboardProps {
 }
 
 const Dashboard = ({ onBack, onNavigate }: DashboardProps) => {
+  const [stats, setStats] = useState({ resolved: 0, inProgress: 0, total: 0 })
+  const [recentActivity, setRecentActivity] = useState<any[]>([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    fetchDashboardData()
+  }, [])
+
+  const fetchDashboardData = async () => {
+    try {
+      setLoading(true)
+      
+      // Fetch complaint stats
+      const { data: complaints, error: complaintsError } = await supabase
+        .from('complaints')
+        .select('status, created_at, complaint_code, issue_type, updated_at')
+        .order('created_at', { ascending: false })
+        .limit(100)
+
+      if (complaintsError) {
+        console.error('Complaints error:', complaintsError)
+        throw complaintsError
+      }
+
+      console.log('Fetched complaints:', complaints)
+
+      // If no complaints, show some mock data for demo
+      if (!complaints || complaints.length === 0) {
+        console.log('No complaints found, using mock data')
+        setStats({ resolved: 5, inProgress: 3, total: 8 })
+        setRecentActivity([
+          {
+            id: 'NGR123456',
+            type: 'Street Light Issues',
+            status: 'Resolved',
+            date: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString()
+          },
+          {
+            id: 'NGR123457',
+            type: 'Pothole/Road Damage',
+            status: 'In-Progress',
+            date: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+          }
+        ])
+        return
+      }
+
+      // Calculate stats
+      const stats = complaints?.reduce((acc, complaint) => {
+        const status = complaint.status?.toLowerCase()
+        if (status === 'resolved') acc.resolved++
+        else if (status === 'assigned' || status === 'in-progress') acc.inProgress++
+        acc.total++
+        return acc
+      }, { resolved: 0, inProgress: 0, total: 0 }) || { resolved: 0, inProgress: 0, total: 0 }
+
+      console.log('Calculated stats:', stats)
+      setStats(stats)
+
+      // Get recent activity (last 5 complaints)
+      const recent = complaints?.slice(0, 5).map(complaint => ({
+        id: complaint.complaint_code,
+        type: complaint.issue_type,
+        status: complaint.status,
+        date: complaint.updated_at || complaint.created_at
+      })) || []
+
+      console.log('Recent activity:', recent)
+      setRecentActivity(recent)
+    } catch (error) {
+      console.error('Error fetching dashboard data:', error)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const getStatusColor = (status: string) => {
+    switch (status?.toLowerCase()) {
+      case 'resolved': return 'border-civic-green text-civic-green'
+      case 'assigned': 
+      case 'in-progress': return 'border-civic-saffron text-civic-saffron'
+      default: return 'border-muted text-muted-foreground'
+    }
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-background to-civic-orange-light">
       {/* Header */}
@@ -23,6 +111,7 @@ const Dashboard = ({ onBack, onNavigate }: DashboardProps) => {
               <p className="text-sm text-muted-foreground">Welcome, Nagar Rakshak!</p>
             </div>
           </div>
+          <NotificationSystem />
         </div>
       </div>
 
@@ -32,7 +121,9 @@ const Dashboard = ({ onBack, onNavigate }: DashboardProps) => {
           <Card className="border-civic-saffron/20">
             <CardContent className="p-4 text-center">
               <CheckCircle className="h-8 w-8 text-civic-green mx-auto mb-2" />
-              <p className="text-2xl font-bold text-civic-green">12</p>
+              <p className="text-2xl font-bold text-civic-green">
+                {loading ? "..." : stats.resolved}
+              </p>
               <p className="text-xs text-muted-foreground">Issues Resolved</p>
             </CardContent>
           </Card>
@@ -40,7 +131,9 @@ const Dashboard = ({ onBack, onNavigate }: DashboardProps) => {
           <Card className="border-civic-green/20">
             <CardContent className="p-4 text-center">
               <Clock className="h-8 w-8 text-civic-saffron mx-auto mb-2" />
-              <p className="text-2xl font-bold text-civic-saffron">3</p>
+              <p className="text-2xl font-bold text-civic-saffron">
+                {loading ? "..." : stats.inProgress}
+              </p>
               <p className="text-xs text-muted-foreground">In Progress</p>
             </CardContent>
           </Card>
@@ -118,21 +211,25 @@ const Dashboard = ({ onBack, onNavigate }: DashboardProps) => {
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
-            <div className="flex items-center justify-between p-3 bg-civic-green/5 rounded-lg">
-              <div>
-                <p className="font-medium">Street Light Fixed</p>
-                <p className="text-sm text-muted-foreground">NGR123456 • 2 hours ago</p>
-              </div>
-              <Badge variant="outline" className="border-civic-green text-civic-green">Resolved</Badge>
-            </div>
-            
-            <div className="flex items-center justify-between p-3 bg-civic-saffron/5 rounded-lg">
-              <div>
-                <p className="font-medium">Pothole Report</p>
-                <p className="text-sm text-muted-foreground">NGR123457 • 1 day ago</p>
-              </div>
-              <Badge variant="outline" className="border-civic-saffron text-civic-saffron">In Progress</Badge>
-            </div>
+            {loading ? (
+              <div className="text-center py-4 text-muted-foreground">Loading recent activity...</div>
+            ) : recentActivity.length === 0 ? (
+              <div className="text-center py-4 text-muted-foreground">No recent activity</div>
+            ) : (
+              recentActivity.map((activity, index) => (
+                <div key={index} className="flex items-center justify-between p-3 bg-muted/5 rounded-lg">
+                  <div>
+                    <p className="font-medium">{activity.type || 'General Issue'}</p>
+                    <p className="text-sm text-muted-foreground">
+                      {activity.id} • {new Date(activity.date).toLocaleDateString()}
+                    </p>
+                  </div>
+                  <Badge variant="outline" className={getStatusColor(activity.status)}>
+                    {activity.status || 'Unknown'}
+                  </Badge>
+                </div>
+              ))
+            )}
           </CardContent>
         </Card>
 
